@@ -1,16 +1,15 @@
-import requests
-import threading
+import aiohttp
+import asyncio
 from bs4 import BeautifulSoup
-import json
-import http.server
-import socketserver
+from aiohttp import web
 import os
 import re
 import psutil
 
-def parse_page(url):
-    response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-    soup = BeautifulSoup(response.text, 'html.parser')
+async def parse_page(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15) as response:
+            soup = BeautifulSoup(await response.text(), 'html.parser')
     
     titles = []
     total_price = 0
@@ -62,41 +61,34 @@ def parse_page(url):
     
     return titles, total_price
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if '/parse' in self.path:
-            page = int(self.path.split('page=')[1].split('&')[0]) if 'page=' in self.path else 1
-            url = "https://dental-first.ru/catalog" if page == 1 else f"https://dental-first.ru/catalog?PAGEN_1={page}"
-            titles, total_price = parse_page(url)
-            
-            with open('thread_products.txt', 'a', encoding='utf-8') as f:
-                f.write('\n'.join(titles) + '\n')
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'products': len(titles),
-                'total_price': total_price,
-                'titles': titles[:10]
-            }, ensure_ascii=False).encode('utf-8'))
-        elif '/stats' in self.path:
-            process = psutil.Process(os.getpid())
-            stats = {
-                'memory_mb': round(process.memory_info().rss / 1024 / 1024, 2),
-                'threads': threading.active_count()
-            }
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(stats).encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
+async def handle_parse(request):
+    page = int(request.query.get('page', 1))
+    url = "https://dental-first.ru/catalog" \
+        if page == 1 \
+        else f"https://dental-first.ru/catalog?PAGEN_1={page}"
+    titles, total_price = await parse_page(url)
+    
+    with open('async_products.txt', 'a', encoding='utf-8') as f:
+        f.write('\n'.join(titles) + '\n')
+    
+    return web.json_response({
+        'products': len(titles),
+        'total_price': total_price,
+        'titles': titles[:10]
+    })
+
+async def handle_stats(request):
+    process = psutil.Process(os.getpid())
+    return web.json_response({
+        'memory_mb': round(process.memory_info().rss / 1024 / 1024, 2),
+        'tasks': len(asyncio.all_tasks())
+    })
 
 if __name__ == '__main__':
-    if os.path.exists('thread_products.txt'):
-        os.remove('thread_products.txt')
-    server = socketserver.TCPServer(("", 8000), Handler)
-    print(f"Многопоточный сервер запущен")
-    server.serve_forever()
+    if os.path.exists('async_products.txt'):
+        os.remove('async_products.txt')
+    app = web.Application()
+    app.router.add_get('/parse', handle_parse)
+    app.router.add_get('/stats', handle_stats)
+    print(f"Асинхронный сервер запущен")
+    web.run_app(app, port=8001)
